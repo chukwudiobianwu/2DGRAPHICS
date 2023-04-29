@@ -76,6 +76,20 @@ std::vector<Vector4d> light_colors;
 //Ambient light
 const Vector4d ambient_light(0.2, 0.2, 0.2, 0);
 
+void loading_bar(int progress, int total){
+
+    int width = 20;
+    float percent = (float)progress/(float)total;
+    int chars= percent * width;
+    std::string bar;
+    bar.reserve(width);
+    for(int i= 0 ; i< width; i++ ){
+
+        bar+= i<chars?"*":" ";
+    }
+    std::cout << "(" << bar << ")" << int(percent*100.0) << " %\r";
+    std::cout.flush(); 
+}
 //Fills the different arrays
 void setup_scene()
 {
@@ -163,11 +177,46 @@ AABBTree::AABBTree(const MatrixXd &V, const MatrixXi &F)
 
 double ray_triangle_intersection(const Vector3d &ray_origin, const Vector3d &ray_direction, const Vector3d &a, const Vector3d &b, const Vector3d &c, Vector3d &p, Vector3d &N)
 {
-    // TODO
-    // Compute whether the ray intersects the given triangle.
-    // If you have done the parallelogram case, this should be very similar to it.
+    const Vector3d pgram_u = b - a;
+    const Vector3d pgram_v = c - a;
+    // Compute normal vector
+    N = pgram_u.cross(pgram_v);
+    double area2 = N.norm();
+    if (area2 == 0) {
+        // Triangle is degenerate
+        return -1;
+    }
+    N /= area2;
 
-    return -1;
+    // Compute intersection with plane containing triangle
+    double t = N.dot(a - ray_origin) / N.dot(ray_direction);
+    if (t < 0) {
+        // Intersection is behind ray origin
+        return -1;
+    }
+    Vector3d intersection = ray_origin + t * ray_direction;
+
+    // Compute barycentric coordinates
+    Vector3d v0 = c - a;
+    Vector3d v1 = b - a;
+    Vector3d v2 = intersection - a;
+    double d00 = v0.dot(v0);
+    double d01 = v0.dot(v1);
+    double d11 = v1.dot(v1);
+    double d20 = v2.dot(v0);
+    double d21 = v2.dot(v1);
+    double denom = d00 * d11 - d01 * d01;
+    double u = (d11 * d20 - d01 * d21) / denom;
+    double v = (d00 * d21 - d01 * d20) / denom;
+
+    // Check if intersection point is inside triangle
+    if (u >= 0 && v >= 0 && u + v <= 1) {
+        p = intersection;
+        return t;
+    } else {
+        // Intersection is outside triangle
+        return -1;
+    }
 }
 
 bool ray_box_intersection(const Vector3d &ray_origin, const Vector3d &ray_direction, const AlignedBox3d &box)
@@ -175,21 +224,59 @@ bool ray_box_intersection(const Vector3d &ray_origin, const Vector3d &ray_direct
     // TODO
     // Compute whether the ray intersects the given box.
     // we are not testing with the real surface here anyway.
-    return false;
+     float loww = 0;                            
+    float highh = std::numeric_limits<float>::max(); 
+    for (int i = 0; i < 3; i++)
+    {
+        float llow = (box.min()[i] - ray_origin[i]) / ray_direction[i];
+        float hhigh = (box.max()[i] - ray_origin[i]) / ray_direction[i];
+
+        if (ray_direction[i] < 0.0)
+        {
+            std::swap(llow, hhigh);
+        }
+        loww = std::max(loww, llow);
+        highh = std::min(highh, hhigh);
+
+        if (loww > highh)
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 //Finds the closest intersecting object returns its index
 //In case of intersection it writes into p and N (intersection point and normals)
 bool find_nearest_object(const Vector3d &ray_origin, const Vector3d &ray_direction, Vector3d &p, Vector3d &N)
 {
+    int closest_index = -1;
+    double closest_t = std::numeric_limits<double>::max(); //closest t is "+ infinity"
+
     Vector3d tmp_p, tmp_N;
+    for (int i = 0; i < facets.rows(); ++i)
+    {
+        Vector3d a = vertices.row(facets(i,0));
+        Vector3d b = vertices.row(facets(i,1));
+        Vector3d c = vertices.row(facets(i,2));
 
-    // TODO
-    // Method (1): Traverse every triangle and return the closest hit.
-    // Method (2): Traverse the BVH tree and test the intersection with a
-    // triangles at the leaf nodes that intersects the input ray.
+        //returns t and writes on tmp_p and tmp_N
+        const double t = ray_triangle_intersection(ray_origin, ray_direction, a, b, c, tmp_p, tmp_N);
+        //We have intersection
+        if (t >= 0)
+        {
+            //The point is before our current closest t
+            if (t < closest_t)
+            {
+                closest_index = i;
+                closest_t = t;
+                p = tmp_p;
+                N = tmp_N;
+            }
+        }
+    }
 
-    return false;
+    return closest_index >= 0;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -219,10 +306,13 @@ Vector4d shoot_ray(const Vector3d &ray_origin, const Vector3d &ray_direction)
         const Vector3d &light_position = light_positions[i];
         const Vector4d &light_color = light_colors[i];
 
-        Vector4d diff_color = obj_diffuse_color;
-
         // Diffuse contribution
         const Vector3d Li = (light_position - p).normalized();
+        // if (!is_light_visible(p, Li, light_position))
+        // {
+        //     continue;
+        // }
+        Vector4d diff_color = obj_diffuse_color;
         const Vector4d diffuse = diff_color * std::max(Li.dot(N), 0.0);
 
         // Specular contribution
@@ -234,8 +324,13 @@ Vector4d shoot_ray(const Vector3d &ray_origin, const Vector3d &ray_direction)
         const Vector3d D = light_position - p;
         lights_color += (diffuse + specular).cwiseProduct(light_color) / D.squaredNorm();
     }
+    Vector4d refl_color = obj_reflection_color;
+    if (nearest_object == 4)
+    {
+        refl_color = Vector4d(0.5, 0.5, 0.5, 0);
+    }
 
-    // Rendering equation
+    Vector4d reflection_color(0, 0, 0, 0);
     Vector4d C = ambient_color + lights_color;
 
     //Set alpha to 1
@@ -262,8 +357,8 @@ void raytrace_scene()
     // and covers an viewing angle given by 'field_of_view'.
     double aspect_ratio = double(w) / double(h);
     //TODO
-    double image_y = 1;
-    double image_x = 1;
+    double image_y = tan(field_of_view / 2) * focal_length;
+    double image_x = image_y * aspect_ratio;
 
     // The pixel grid through which we shoot rays is at a distance 'focal_length'
     const Vector3d image_origin(-image_x, image_y, camera_position[2] - focal_length);
@@ -298,8 +393,12 @@ void raytrace_scene()
             G(i, j) = C(1);
             B(i, j) = C(2);
             A(i, j) = C(3);
+
+            loading_bar(i,w-i);
         }
     }
+
+    std::cout << std::endl;
 
     // Save to png
     write_matrix_to_png(R, G, B, A, filename);
